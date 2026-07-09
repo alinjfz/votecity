@@ -582,7 +582,7 @@ function App() {
           <section className="hero-section">
             <div className="hero-copy">
               <span className="eyebrow">Neighbourhood priorities, made visible</span>
-              <h1>A better way for residents to raise needs and vote on what their area needs next.</h1>
+              <h1>A better way for residents to raise needs and <em>vote</em> on what their area needs next.</h1>
               <p>
                 VoteCity helps local communities put real needs on the map, back them with visible
                 support, and give councils a clearer signal about what deserves action first.
