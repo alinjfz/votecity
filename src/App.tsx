@@ -1,5 +1,4 @@
 import { FormEvent, useEffect, useMemo, useRef, useState } from "react";
-import type { Session } from "@supabase/supabase-js";
 import L from "leaflet";
 import {
   Avatar,
@@ -26,12 +25,11 @@ import {
 } from "./data/seed";
 import { useCountUp } from "./hooks/useCountUp";
 import { isOpenRouterConfigured, reviewNeedWithOpenRouter } from "./lib/openrouter";
-import { isSupabaseConfigured, supabase } from "./lib/supabase";
 import { AiReview, AppState, NeedCategory, NeedItem, NeedStatus } from "./types";
 import voteCityMark from "./assets/votecity-mark.png";
 
 const STORAGE_KEY = "votecity-state";
-const DEMO_AUTH_KEY = "votecity-demo-user";
+const AUTH_KEY = "votecity-user";
 const REVIEW_MINUTES_SAVED_PER_NEED = 18;
 const AVERAGE_OFFICER_HOURLY_COST = 32;
 const AVOIDED_LOW_DEMAND_SPEND_PER_PRIORITY = 2400;
@@ -43,7 +41,34 @@ interface AppIdentity {
   id: string;
   email: string;
   displayName: string;
-  source: "supabase" | "demo";
+}
+
+interface StoredAccount {
+  id: string;
+  email: string;
+  displayName: string;
+  passwordHash: string;
+}
+
+function hashPassword(password: string): string {
+  let hash = 0;
+  for (let i = 0; i < password.length; i++) {
+    hash = (Math.imul(31, hash) + password.charCodeAt(i)) | 0;
+  }
+  return hash.toString(36);
+}
+
+function loadAccounts(): Record<string, StoredAccount> {
+  try {
+    const raw = window.localStorage.getItem("votecity-accounts");
+    return raw ? (JSON.parse(raw) as Record<string, StoredAccount>) : {};
+  } catch {
+    return {};
+  }
+}
+
+function saveAccounts(accounts: Record<string, StoredAccount>) {
+  window.localStorage.setItem("votecity-accounts", JSON.stringify(accounts));
 }
 
 const currency = new Intl.NumberFormat("en-GB", {
@@ -82,19 +107,11 @@ function loadState(): AppState {
   }
 }
 
-function loadDemoIdentity(): AppIdentity | null {
-  if (typeof window === "undefined") {
-    return null;
-  }
-
-  const raw = window.localStorage.getItem(DEMO_AUTH_KEY);
-
-  if (!raw) {
-    return null;
-  }
-
+function loadIdentity(): AppIdentity | null {
+  if (typeof window === "undefined") return null;
   try {
-    return JSON.parse(raw) as AppIdentity;
+    const raw = window.localStorage.getItem(AUTH_KEY);
+    return raw ? (JSON.parse(raw) as AppIdentity) : null;
   } catch {
     return null;
   }
@@ -124,26 +141,7 @@ function App() {
   }, [state]);
 
   useEffect(() => {
-    if (!isSupabaseConfigured) {
-      setIdentity(loadDemoIdentity());
-      return;
-    }
-
-    let active = true;
-
-    supabase?.auth.getSession().then(({ data }) => {
-      if (!active) return;
-      setIdentity(sessionToIdentity(data.session));
-    });
-
-    const subscription = supabase?.auth.onAuthStateChange((_event, session) => {
-      setIdentity(sessionToIdentity(session));
-    });
-
-    return () => {
-      active = false;
-      subscription?.data.subscription.unsubscribe();
-    };
+    setIdentity(loadIdentity());
   }, []);
 
   const userVoteIds = useMemo(() => {
@@ -356,53 +354,53 @@ function App() {
     }
   }
 
-  async function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
+  function handleAuthSubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     setAuthPending(true);
     setAuthError("");
 
     const formData = new FormData(event.currentTarget);
-    const email = String(formData.get("email") || "").trim();
+    const email = String(formData.get("email") || "").trim().toLowerCase();
     const password = String(formData.get("password") || "").trim();
     const name = String(formData.get("name") || "").trim();
 
     try {
-      if (isSupabaseConfigured && supabase) {
-        if (authMode === "signup") {
-          const { error } = await supabase.auth.signUp({
-            email,
-            password,
-            options: {
-              data: {
-                display_name: name || email.split("@")[0]
-              }
-            }
-          });
+      const accounts = loadAccounts();
+      const passwordHash = hashPassword(password);
 
-          if (error) throw error;
-        } else {
-          const { error } = await supabase.auth.signInWithPassword({
-            email,
-            password
-          });
-
-          if (error) throw error;
+      if (authMode === "signup") {
+        if (accounts[email]) {
+          throw new Error("An account with that email already exists.");
         }
-
-        setAuthOpen(false);
-        event.currentTarget.reset();
-        return;
+        const newAccount: StoredAccount = {
+          id: `user-${crypto.randomUUID()}`,
+          email,
+          displayName: name || email.split("@")[0],
+          passwordHash
+        };
+        accounts[email] = newAccount;
+        saveAccounts(accounts);
+        const newIdentity: AppIdentity = {
+          id: newAccount.id,
+          email: newAccount.email,
+          displayName: newAccount.displayName
+        };
+        window.localStorage.setItem(AUTH_KEY, JSON.stringify(newIdentity));
+        setIdentity(newIdentity);
+      } else {
+        const account = accounts[email];
+        if (!account || account.passwordHash !== passwordHash) {
+          throw new Error("Incorrect email or password.");
+        }
+        const foundIdentity: AppIdentity = {
+          id: account.id,
+          email: account.email,
+          displayName: account.displayName
+        };
+        window.localStorage.setItem(AUTH_KEY, JSON.stringify(foundIdentity));
+        setIdentity(foundIdentity);
       }
 
-      const demoIdentity: AppIdentity = {
-        id: `demo-${email.toLowerCase()}`,
-        email,
-        displayName: name || email.split("@")[0],
-        source: "demo"
-      };
-
-      window.localStorage.setItem(DEMO_AUTH_KEY, JSON.stringify(demoIdentity));
-      setIdentity(demoIdentity);
       setAuthVersion((value) => value + 1);
       setAuthOpen(false);
       event.currentTarget.reset();
@@ -413,13 +411,8 @@ function App() {
     }
   }
 
-  async function handleSignOut() {
-    if (isSupabaseConfigured && supabase) {
-      await supabase.auth.signOut();
-      return;
-    }
-
-    window.localStorage.removeItem(DEMO_AUTH_KEY);
+  function handleSignOut() {
+    window.localStorage.removeItem(AUTH_KEY);
     setIdentity(null);
     setAuthVersion((value) => value + 1);
   }
@@ -560,7 +553,7 @@ function App() {
                   <Avatar fallback={initials(identity.displayName)} radius="full" size="2" />
                   <div>
                     <strong>{identity.displayName}</strong>
-                    <span>{identity.source === "supabase" ? "Account" : "Demo account"}</span>
+                    <span>Account</span>
                   </div>
                 </div>
                 <Button variant="soft" onClick={handleSignOut}>
@@ -595,14 +588,6 @@ function App() {
                   Add a local need
                 </Button>
               </div>
-              {!isSupabaseConfigured ? (
-                <Callout.Root color="amber" className="auth-callout">
-                  <Callout.Text>
-                    Supabase keys are not configured yet, so auth is running in local demo mode.
-                    Add `VITE_SUPABASE_URL` and `VITE_SUPABASE_ANON_KEY` for production auth.
-                  </Callout.Text>
-                </Callout.Root>
-              ) : null}
             </div>
 
             <div className="hero-media">
@@ -1206,7 +1191,6 @@ function App() {
           authMode={authMode}
           authPending={authPending}
           authVersion={authVersion}
-          configured={isSupabaseConfigured}
           onSubmit={handleAuthSubmit}
           setAuthMode={setAuthMode}
         />
@@ -1219,7 +1203,6 @@ function AuthDialog({
   authMode,
   authPending,
   authError,
-  configured,
   authVersion,
   onSubmit,
   setAuthMode
@@ -1227,7 +1210,6 @@ function AuthDialog({
   authMode: AuthMode;
   authPending: boolean;
   authError: string;
-  configured: boolean;
   authVersion: number;
   onSubmit: (event: FormEvent<HTMLFormElement>) => void;
   setAuthMode: (mode: AuthMode) => void;
@@ -1260,7 +1242,7 @@ function AuthDialog({
         {authMode === "signup" ? (
           <label>
             Name
-            <TextField.Root name="name" placeholder="Your name" required={!configured} />
+            <TextField.Root name="name" placeholder="Your name" />
           </label>
         ) : null}
         <label>
@@ -1271,13 +1253,6 @@ function AuthDialog({
           Password
           <TextField.Root name="password" placeholder="Password" required type="password" />
         </label>
-        {!configured ? (
-          <Callout.Root color="amber">
-            <Callout.Text>
-              Supabase is not configured, so this form creates a local demo account for now.
-            </Callout.Text>
-          </Callout.Root>
-        ) : null}
         {authError ? (
           <Callout.Root color="red">
             <Callout.Text>{authError}</Callout.Text>
@@ -1390,20 +1365,6 @@ function LocationPickerLayer({
   );
 }
 
-function sessionToIdentity(session: Session | null): AppIdentity | null {
-  if (!session?.user.email) {
-    return null;
-  }
-
-  return {
-    id: session.user.id,
-    email: session.user.email,
-    displayName:
-      (session.user.user_metadata.display_name as string | undefined) ??
-      session.user.email.split("@")[0],
-    source: "supabase"
-  };
-}
 
 function calculatePriorityScore(need: NeedItem) {
   let score = 40;
